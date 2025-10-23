@@ -1,20 +1,25 @@
 package proxmox
 
 import (
+	"context"
 	"fmt"
 
-	pxapi "github.com/Telmate/proxmox-api-go/proxmox"
+	pveSDK "github.com/Telmate/proxmox-api-go/proxmox"
+	"github.com/Telmate/terraform-provider-proxmox/v2/proxmox/Internal/util"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
+
+const schemaPoolComment = "comment"
 
 var poolResourceDef *schema.Resource
 
 func resourcePool() *schema.Resource {
 	poolResourceDef = &schema.Resource{
-		Create: resourcePoolCreate,
-		Read:   resourcePoolRead,
-		Update: resourcePoolUpdate,
-		Delete: resourcePoolDelete,
+		CreateContext: resourcePoolCreate,
+		ReadContext:   resourcePoolRead,
+		UpdateContext: resourcePoolUpdate,
+		DeleteContext: resourcePoolDelete,
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
 		},
@@ -25,8 +30,9 @@ func resourcePool() *schema.Resource {
 				Required: true,
 				ForceNew: true,
 			},
-			"comment": {
+			schemaPoolComment: {
 				Type:     schema.TypeString,
+				Default:  defaultDescription,
 				Optional: true,
 			},
 		},
@@ -36,7 +42,7 @@ func resourcePool() *schema.Resource {
 	return poolResourceDef
 }
 
-func resourcePoolCreate(d *schema.ResourceData, meta interface{}) error {
+func resourcePoolCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	client := pconf.Client
 	lock := pmParallelBegin(pconf)
@@ -44,27 +50,27 @@ func resourcePoolCreate(d *schema.ResourceData, meta interface{}) error {
 
 	poolid := d.Get("poolid").(string)
 
-	err := pxapi.ConfigPool{
-		Name:    pxapi.PoolName(poolid),
-		Comment: pointer(d.Get("comment").(string)),
-	}.Create(client)
+	err := pveSDK.ConfigPool{
+		Name:    pveSDK.PoolName(poolid),
+		Comment: util.Pointer(d.Get("comment").(string)),
+	}.Create(ctx, client)
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 
 	d.SetId(clusterResourceId("pools", poolid))
 
-	return _resourcePoolRead(d, meta)
+	return diag.FromErr(_resourcePoolRead(ctx, d, meta))
 }
 
-func resourcePoolRead(d *schema.ResourceData, meta interface{}) error {
+func resourcePoolRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	lock := pmParallelBegin(pconf)
 	defer lock.unlock()
-	return _resourcePoolRead(d, meta)
+	return diag.FromErr(_resourcePoolRead(ctx, d, meta))
 }
 
-func _resourcePoolRead(d *schema.ResourceData, meta interface{}) error {
+func _resourcePoolRead(ctx context.Context, d *schema.ResourceData, meta interface{}) error {
 	pconf := meta.(*providerConfiguration)
 	client := pconf.Client
 
@@ -74,27 +80,26 @@ func _resourcePoolRead(d *schema.ResourceData, meta interface{}) error {
 		return fmt.Errorf("unexpected error when trying to read and parse resource id: %v", err)
 	}
 
+	pool := pveSDK.PoolName(poolID)
+
 	logger, _ := CreateSubLogger("resource_pool_read")
 	logger.Info().Str("poolid", poolID).Msg("Reading configuration for poolid")
 
-	poolInfo, err := client.GetPoolInfo(poolID)
+	rawPool, err := pool.Get(ctx, client)
 	if err != nil {
 		d.SetId("")
 		return nil
 	}
 
 	d.SetId(clusterResourceId("pools", poolID))
-	d.Set("comment", "")
-	if poolInfo["comment"] != nil {
-		d.Set("comment", poolInfo["comment"].(string))
-	}
+	d.Set("comment", rawPool.GetComment())
 
 	// DEBUG print the read result
-	logger.Debug().Str("poolid", poolID).Msgf("Finished pool read resulting in data: '%+v'", poolInfo)
+	logger.Debug().Str("poolid", poolID).Msgf("Finished pool read resulting in data: '%+v'", rawPool.Get())
 	return nil
 }
 
-func resourcePoolUpdate(d *schema.ResourceData, meta interface{}) error {
+func resourcePoolUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	lock := pmParallelBegin(pconf)
 	defer lock.unlock()
@@ -104,25 +109,25 @@ func resourcePoolUpdate(d *schema.ResourceData, meta interface{}) error {
 	client := pconf.Client
 	_, poolID, err := parseClusterResourceId(d.Id())
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 
 	logger.Info().Str("poolid", poolID).Msg("Starting update of the Pool resource")
 
 	if d.HasChange("comment") {
-		err := pxapi.ConfigPool{
-			Name:    pxapi.PoolName(poolID),
-			Comment: pointer(d.Get("comment").(string)),
-		}.Update(client)
+		err := pveSDK.ConfigPool{
+			Name:    pveSDK.PoolName(poolID),
+			Comment: util.Pointer(d.Get("comment").(string)),
+		}.Update(ctx, client)
 		if err != nil {
-			return err
+			return diag.FromErr(err)
 		}
 	}
 
-	return _resourcePoolRead(d, meta)
+	return diag.FromErr(_resourcePoolRead(ctx, d, meta))
 }
 
-func resourcePoolDelete(d *schema.ResourceData, meta interface{}) error {
+func resourcePoolDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	lock := pmParallelBegin(pconf)
 	defer lock.unlock()
@@ -131,10 +136,10 @@ func resourcePoolDelete(d *schema.ResourceData, meta interface{}) error {
 	_, poolID, err := parseClusterResourceId(d.Id())
 
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
-	if err = pxapi.PoolName(poolID).Delete(client); err != nil {
-		return err
+	if err = pveSDK.PoolName(poolID).Delete(ctx, client); err != nil {
+		return diag.FromErr(err)
 	}
 
 	return nil

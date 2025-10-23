@@ -38,7 +38,7 @@ When using the Terraform provider for Proxmox, you do not need to create a confi
 specify the settings that you want to pass into the guest. The most common one will be ipconfig0 to configure the first
 network interface, but there are
 [more listed in the Proxmox docs](https://pve.proxmox.com/wiki/Cloud-Init_Support#_cloud_init_specific_options).
-There is an example of this in [examples/cloudinit_example.tf](../../examples/cloudinit_example.tf).
+There is an example of this in [examples/cloudinit_example.tf](../examples/cloudinit_example.tf).
 
 Now, there is one other way to get the configuration data into the guest without using this magical CloudInit CD-ROM and
 that's by using cicustom. This allows you to create a NoCloud (v1) or ConfigDrive (v2) configuration file instead of
@@ -57,7 +57,7 @@ main.tf:
 /* Uses Cloud-Init options from Proxmox 5.2 */
 resource "proxmox_vm_qemu" "cloudinit-test" {
   name        = "tftest1.xyz.com"
-  desc        = "tf description"
+  description = "tf description"
   target_node = "proxmox1-xx"
 
   clone = "ci-ubuntu-template"
@@ -124,7 +124,7 @@ resource "proxmox_vm_qemu" "cloudinit-test" {
   ]
 
   name        = "tftest1.xyz.com"
-  desc        = "tf description"
+  description = "tf description"
   target_node = "proxmox1-xx"
 
   clone = "ci-ubuntu-template"
@@ -177,7 +177,7 @@ EOF
 /* Uses custom eth1 user-net SSH portforward */
 resource "proxmox_vm_qemu" "preprovision-test" {
   name        = "tftest1.xyz.com"
-  desc        = "tf description"
+  description = "tf description"
   target_node = "proxmox1-xx"
 
   clone = "terraform-ubuntu1404-template"
@@ -189,7 +189,7 @@ resource "proxmox_vm_qemu" "preprovision-test" {
   sockets  = 1
   # Same CPU as the Physical host, possible to add cpu flags
   # Ex: "host,flags=+md-clear;+pcid;+spec-ctrl;+ssbd;+pdpe1gb"
-  cpu      = "host"
+  cpu_type = "host"
   numa     = false
   memory   = 2560
   scsihw   = "lsi"

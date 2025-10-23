@@ -6,8 +6,8 @@ and [proxmox_lxc](resources/lxc.md).
 
 ## Creating the Proxmox user and role for terraform
 
-The particular privileges required may change but here is a suitable starting point rather than using cluster-wide
-Administrator rights
+To ensure security, it's best practice to create a dedicated user and role for Terraform instead of using cluster-wide Administrator rights. 
+The particular privileges required may change but here is a suitable starting point.
 
 Log into the Proxmox cluster or host using ssh (or mimic these in the GUI) then:
 
@@ -15,26 +15,43 @@ Log into the Proxmox cluster or host using ssh (or mimic these in the GUI) then:
 - Create the user "terraform-prov@pve"
 - Add the TERRAFORM-PROV role to the terraform-prov user
 
+### Proxmox 9 and Newer
+
+In Proxmox 9, the `VM.Monitor` privilege was deprecated and is no longer required.
+
 ```bash
-pveum role add TerraformProv -privs "Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
+pveum role add TerraformProv -privs "Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Pool.Audit Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.PowerMgmt SDN.Use"
 pveum user add terraform-prov@pve --password <password>
 pveum aclmod / -user terraform-prov@pve -role TerraformProv
 ```
 
-The provider also supports using an API key rather than a password, see below for details.
+### Proxmox 8 and Older
 
-After the role is in use, if there is a need to modify the privileges, simply issue the command showed, adding or
-removing privileges as needed.
+For older versions of Proxmox, the `VM.Monitor` privilege is required.
 
-
-Proxmox > 8:
 ```bash
-pveum role modify TerraformProv -privs "Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
+pveum role add TerraformProv -privs "Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Monitor VM.Migrate VM.PowerMgmt SDN.Use"
+pveum user add terraform-prov@pve --password <password>
+pveum aclmod / -user terraform-prov@pve -role TerraformProv
 ```
-Proxmox < 8:
+
+### Modifying Privileges
+
+If you need to adjust the role's permissions later, you can use the `pveum role modify` command. Simply add or remove privileges from the `-privs` list as needed.
+For example if you are migrating from Proxmox 8 to 9, you may run the following command to remove `VM.Monitor`
+
 ```bash
-pveum role modify TerraformProv -privs "Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt"
+pveum role modify TerraformProv -privs "Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.PowerMgmt SDN.Use"
 ```
+
+### Using an API Token (Recommended)
+
+The provider also supports using an API token rather than a password. To create an API token, use the following command:
+
+```bash
+pveum user token add terraform-prov@pve mytoken
+```
+
 For more information on existing roles and privileges in Proxmox, refer to the vendor docs
 on [PVE User Management](https://pve.proxmox.com/wiki/User_Management)
 
@@ -55,13 +72,15 @@ their HCL.
 ```hcl
 provider "proxmox" {
   pm_api_url = "https://proxmox-server01.example.com:8006/api2/json"
+  pm_tls_insecure = true # By default Proxmox Virtual Environment uses self-signed certificates.
 }
 ```
 
 ## Creating the connection via username and API token
 
 ```bash
-export PM_API_TOKEN_ID="terraform-prov@pve!mytoken"
+# use single quotes for the API token ID because of the exclamation mark
+export PM_API_TOKEN_ID='terraform-prov@pve!mytoken'
 export PM_API_TOKEN_SECRET="afcd8f45-acc1-4d0f-bb12-a70b0777ec11"
 ```
 
@@ -97,24 +116,24 @@ provider "proxmox" {
 
 The following arguments are supported in the provider block:
 
-- `pm_api_url` - (Required; or use environment variable `PM_API_URL`) This is the target Proxmox API endpoint.
-- `pm_user` - (Optional; or use environment variable `PM_USER`) The user, remember to include the authentication realm
-  such as myuser@pam or myuser@pve.
-- `pm_password` - (Optional; sensitive; or use environment variable `PM_PASS`) The password.
-- `pm_api_token_id` - (Optional; or use environment variable `PM_API_TOKEN_ID`) This is
-  an [API token](https://pve.proxmox.com/pve-docs/pveum-plain.html) you have previously created for a specific user.
-- `pm_api_token_secret` - (Optional; or use environment variable `PM_API_TOKEN_SECRET`) This uuid is only
-  available when the token was initially created.
-- `pm_otp` - (Optional; or use environment variable `PM_OTP`) The 2FA OTP code.
-- `pm_tls_insecure` - (Optional) Disable TLS verification while connecting to the proxmox server.
-- `pm_parallel` - (Optional; defaults to 4) Allowed simultaneous Proxmox processes (e.g. creating resources).
-- `pm_log_enable` - (Optional; defaults to false) Enable debug logging, see the section below for logging details.
-- `pm_log_levels` - (Optional) A map of log sources and levels.
-- `pm_log_file` - (Optional; defaults to "terraform-plugin-proxmox.log") If logging is enabled, the log file the
-  provider will write logs to.
-- `pm_timeout` - (Optional; defaults to 300) Timeout value (seconds) for proxmox API calls.
-- `pm_debug` - (Optional; defaults to false) Enable verbose output in proxmox-api-go
-- `pm_proxy_server` - (Optional; defaults to nil) Send provider api call to a proxy server for easy debugging
+| Argument                     | environment variable | Type     | Default Value                  | Description |
+|:---------------------------- |:-------------------- |:-------- |:------------------------------ |:----------- |
+| `pm_api_url`                 | `PM_API_URL`         | `string` |                                | **Required** This is the target Proxmox API endpoint.|
+| `pm_user`                    | `PM_USER`            | `string` |                                | The user, remember to include the authentication realm such as myuser@pam or myuser@pve.|
+| `pm_password`                | `PM_PASS`            | `string` |                                | **Sensitive** The password.|
+| `pm_api_token_id`            | `PM_API_TOKEN_ID`    | `string` |                                | This is an [API token](https://pve.proxmox.com/pve-docs/pveum-plain.html) you have previously created for a specific user.|
+| `pm_api_token_secret`        | `PM_API_TOKEN_SECRET`| `string` |                                | **Sensitive** This uuid is only available when the token was initially created.|
+| `pm_otp`                     | `PM_OTP`             | `string` |                                | The 2FA OTP code.|
+| `pm_tls_insecure`            |                      | `bool`   | `false`                        | Disable TLS verification while connecting to the proxmox server.|
+| `pm_parallel`                |                      | `uint`   | `1`                            | Allowed simultaneous Proxmox processes (e.g. creating resources). Setting this greater than 1 is currently not recommended when creating LXC containers with dynamic id allocation. For Qemu the threading issue has been resolved.|
+| `pm_log_enable`              |                      | `bool`   | `false`                        | Enable debug logging, see the section below for logging details.|
+| `pm_log_levels`              |                      | `map`    |                                | A map of log sources and levels.|
+| `pm_log_file`                |                      | `string` | `terraform-plugin-proxmox.log` | The log file the provider will write logs to.|
+| `pm_timeout`                 |                      | `uint`   | `300`                          | Timeout value (seconds) for proxmox API calls.|
+| `pm_debug`                   |                      | `bool`   | `false`                        | Enable verbose output in proxmox-api-go.|
+| `pm_proxy_server`            |                      | `string` |                                | Send provider api call to a proxy server for easy debugging.|
+| `pm_minimum_permission_check`|                      | `bool`   | `true`                         | Enable minimum permission check. This will check if the user has the minimum permissions required to use the provider.|
+| `pm_minimum_permission_list` |                      | `list`   |                                | A list of permissions to check. Allows overwriting of the default permissions.|
 
 Additionally, one can set the `PM_OTP_PROMPT` environment variable to prompt for OTP 2FA code (if required).
 

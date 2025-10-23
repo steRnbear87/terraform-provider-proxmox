@@ -1,21 +1,23 @@
 package proxmox
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/Telmate/proxmox-api-go/proxmox"
+	pveSDK "github.com/Telmate/proxmox-api-go/proxmox"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func resourceStorageIso() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceStorageIsoCreate,
-		Read:   resourceStorageIsoRead,
-		Delete: resourceStorageIsoDelete,
+		CreateContext: resourceStorageIsoCreate,
+		ReadContext:   resourceStorageIsoRead,
+		DeleteContext: resourceStorageIsoDelete,
 
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
@@ -57,7 +59,7 @@ func resourceStorageIso() *schema.Resource {
 	}
 }
 
-func resourceStorageIsoCreate(d *schema.ResourceData, meta interface{}) error {
+func resourceStorageIsoCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 
 	lock := pmParallelBegin(pconf)
@@ -69,24 +71,24 @@ func resourceStorageIsoCreate(d *schema.ResourceData, meta interface{}) error {
 	node := d.Get("pve_node").(string)
 
 	client := pconf.Client
-	file, err := os.CreateTemp("/tmp", fileName)
+	file, err := os.CreateTemp(os.TempDir(), fileName)
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 	err = _downloadFile(url, file)
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 	file.Seek(0, 0)
 	defer file.Close()
-	err = client.Upload(node, storage, isoContentType, fileName, file)
+	err = client.Upload(ctx, node, storage, isoContentType, fileName, file)
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 	volId := fmt.Sprintf("%s:%s/%s", storage, isoContentType, fileName)
 	d.SetId(volId)
 
-	return resourceStorageIsoRead(d, meta)
+	return resourceStorageIsoRead(ctx, d, meta)
 }
 
 func _downloadFile(url string, file *os.File) error {
@@ -108,18 +110,14 @@ func _downloadFile(url string, file *os.File) error {
 	return nil
 }
 
-func resourceStorageIsoRead(d *schema.ResourceData, meta interface{}) error {
+func resourceStorageIsoRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	client := pconf.Client
 
 	var isoFound bool
-	pveNode := d.Get("pve_node").(string)
-	vmRef := &proxmox.VmRef{}
-	vmRef.SetNode(pveNode)
-	vmRef.SetVmType(isoContentType)
-	storageContent, err := client.GetStorageContent(vmRef, d.Get("storage").(string))
+	storageContent, err := client.GetStorageContent(ctx, d.Get("storage").(string), pveSDK.NodeName(d.Get("pve_node").(string)))
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 	contents := storageContent["data"].([]interface{})
 	for c := range contents {
@@ -139,7 +137,7 @@ func resourceStorageIsoRead(d *schema.ResourceData, meta interface{}) error {
 	return nil
 }
 
-func resourceStorageIsoDelete(d *schema.ResourceData, meta interface{}) error {
+func resourceStorageIsoDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	pconf := meta.(*providerConfiguration)
 	client := pconf.Client
 	lock := pmParallelBegin(pconf)
@@ -147,9 +145,9 @@ func resourceStorageIsoDelete(d *schema.ResourceData, meta interface{}) error {
 
 	storage := strings.SplitN(d.Id(), ":", 2)[0]
 	isoURL := fmt.Sprintf("/nodes/%s/storage/%s/content/%s", d.Get("pve_node").(string), storage, d.Id())
-	err := client.Delete(isoURL)
+	err := client.Delete(ctx, isoURL)
 	if err != nil {
-		return err
+		return diag.FromErr(err)
 	}
 	return nil
 }

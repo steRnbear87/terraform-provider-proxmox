@@ -1,24 +1,48 @@
 package proxmox
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/url"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
-	pxapi "github.com/Telmate/proxmox-api-go/proxmox"
+	pveSDK "github.com/Telmate/proxmox-api-go/proxmox"
+	"github.com/Telmate/terraform-provider-proxmox/v2/proxmox/Internal/validator"
+	"github.com/hashicorp/go-cty/cty"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
+const (
+	schemaPmUser                               = "pm_user"
+	schemaPmPassword                           = "pm_password"
+	schemaPmApiUrl                             = "pm_api_url"
+	schemaPmApiTokenID                         = "pm_api_token_id"
+	schemaPmApiTokenSecret                     = "pm_api_token_secret"
+	schemaPmParallel                           = "pm_parallel"
+	schemaPmTlsInsecure                        = "pm_tls_insecure"
+	schemaPmHttpHeaders                        = "pm_http_headers"
+	schemaPmLogEnable                          = "pm_log_enable"
+	schemaPmLogLevels                          = "pm_log_levels"
+	schemaPmLogFile                            = "pm_log_file"
+	schemaPmTimeout                            = "pm_timeout"
+	schemaPmDangerouslyIgnoreUnknownAttributes = "pm_dangerously_ignore_unknown_attributes"
+	schemaPmDebug                              = "pm_debug"
+	schemaPmProxyServer                        = "pm_proxy_server"
+	schemaMinimumPermissionCheck               = "pm_minimum_permission_check"
+	schemaMinimumPermissionList                = "pm_minimum_permission_list"
+	schemaPmOTP                                = "pm_otp"
+)
+
 type providerConfiguration struct {
-	Client                             *pxapi.Client
+	Client                             *pveSDK.Client
 	MaxParallel                        int
 	CurrentParallel                    int
-	MaxVMID                            int
+	MaxGuestID                         pveSDK.GuestID
 	Mutex                              *sync.Mutex
 	Cond                               *sync.Cond
 	LogFile                            string
@@ -45,20 +69,20 @@ func Provider() *schema.Provider {
 	return &schema.Provider{
 
 		Schema: map[string]*schema.Schema{
-			"pm_user": {
+			schemaPmUser: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_USER", nil),
 				Description: "Username e.g. myuser or myuser@pam",
 			},
-			"pm_password": {
+			schemaPmPassword: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_PASS", nil),
 				Description: "Password to authenticate into proxmox",
 				Sensitive:   true,
 			},
-			"pm_api_url": {
+			schemaPmApiUrl: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_API_URL", ""),
@@ -81,84 +105,103 @@ func Provider() *schema.Provider {
 				},
 				Description: "https://host.fqdn:8006/api2/json",
 			},
-			"pm_api_token_id": {
+			schemaPmApiTokenID: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_API_TOKEN_ID", nil),
 				Description: "API TokenID e.g. root@pam!mytesttoken",
 			},
-			"pm_api_token_secret": {
+			schemaPmApiTokenSecret: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_API_TOKEN_SECRET", nil),
 				Description: "The secret uuid corresponding to a TokenID",
 				Sensitive:   true,
 			},
-			"pm_parallel": {
+			schemaPmParallel: {
 				Type:     schema.TypeInt,
 				Optional: true,
-				Default:  4,
+				Default:  1,
+				ValidateDiagFunc: func(i interface{}, k cty.Path) diag.Diagnostics {
+					v, ok := i.(int)
+					if !ok {
+						return diag.Errorf(validator.ErrorUint, k)
+					}
+					if v < 1 {
+						return diag.Errorf(schemaPmParallel + " must be greater than 0")
+					}
+					return nil
+				},
 			},
-			"pm_tls_insecure": {
+			schemaPmTlsInsecure: {
 				Type:        schema.TypeBool,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("PM_TLS_INSECURE", true), //we assume it's a lab!
+				DefaultFunc: schema.EnvDefaultFunc("PM_TLS_INSECURE", false), // we assume it's a production environment.
 				Description: "By default, every TLS connection is verified to be secure. This option allows terraform to proceed and operate on servers considered insecure. For example if you're connecting to a remote host and you do not have the CA cert that issued the proxmox api url's certificate.",
 			},
-			"pm_http_headers": {
+			schemaPmHttpHeaders: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_HTTP_HEADERS", nil),
 				Description: "Set custom http headers e.g. Key,Value,Key1,Value1",
 			},
-			"pm_log_enable": {
+			schemaPmLogEnable: {
 				Type:        schema.TypeBool,
 				Optional:    true,
 				Default:     false,
 				Description: "Enable provider logging to get proxmox API logs",
 			},
-			"pm_log_levels": {
+			schemaPmLogLevels: {
 				Type:        schema.TypeMap,
 				Optional:    true,
 				Description: "Configure the logging level to display; trace, debug, info, warn, etc",
 			},
-			"pm_log_file": {
+			schemaPmLogFile: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Default:     "terraform-plugin-proxmox.log",
 				Description: "Write logs to this specific file",
 			},
-			"pm_timeout": {
+			schemaPmTimeout: {
 				Type:        schema.TypeInt,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_TIMEOUT", 1200),
 				Description: "How many seconds to wait for operations for both provider and api-client, default is 20m",
 			},
-			"pm_dangerously_ignore_unknown_attributes": {
+			schemaPmDangerouslyIgnoreUnknownAttributes: {
 				Type:        schema.TypeBool,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_DANGEROUSLY_IGNORE_UNKNOWN_ATTRIBUTES", false),
 				Description: "By default this provider will exit if an unknown attribute is found. This is to prevent the accidential destruction of VMs or Data when something in the proxmox API has changed/updated and is not confirmed to work with this provider. Set this to true at your own risk. It may allow you to proceed in cases when the provider refuses to work, but be aware of the danger in doing so.",
 			},
-			"pm_debug": {
+			schemaPmDebug: {
 				Type:        schema.TypeBool,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_DEBUG", false),
 				Description: "Enable or disable the verbose debug output from proxmox api",
 			},
-			"pm_proxy_server": {
+			schemaPmProxyServer: {
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("PM_PROXY", nil),
 				Description: "Proxy Server passed to Api client(useful for debugging). Syntax: http://proxy:port",
 			},
-			"pm_otp": &pmOTPprompt,
+			schemaMinimumPermissionCheck: {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  true},
+			schemaMinimumPermissionList: {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString}},
+			schemaPmOTP: &pmOTPprompt,
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
 			"proxmox_vm_qemu":         resourceVmQemu(),
 			"proxmox_lxc":             resourceLxc(),
 			"proxmox_lxc_disk":        resourceLxcDisk(),
+			"proxmox_lxc_guest":       resourceLxcGuest(),
 			"proxmox_pool":            resourcePool(),
 			"proxmox_cloud_init_disk": resourceCloudInitDisk(),
 			"proxmox_storage_iso":     resourceStorageIso(),
@@ -174,29 +217,29 @@ func Provider() *schema.Provider {
 	}
 }
 
-func providerConfigure(d *schema.ResourceData) (interface{}, error) {
+func providerConfigure(d *schema.ResourceData) (any, error) {
 	client, err := getClient(
-		d.Get("pm_api_url").(string),
-		d.Get("pm_user").(string),
-		d.Get("pm_password").(string),
-		d.Get("pm_api_token_id").(string),
-		d.Get("pm_api_token_secret").(string),
-		d.Get("pm_otp").(string),
-		d.Get("pm_tls_insecure").(bool),
-		d.Get("pm_http_headers").(string),
-		d.Get("pm_timeout").(int),
-		d.Get("pm_debug").(bool),
-		d.Get("pm_proxy_server").(string),
+		d.Get(schemaPmApiUrl).(string),
+		d.Get(schemaPmUser).(string),
+		d.Get(schemaPmPassword).(string),
+		d.Get(schemaPmApiTokenID).(string),
+		d.Get(schemaPmApiTokenSecret).(string),
+		d.Get(schemaPmOTP).(string),
+		d.Get(schemaPmTlsInsecure).(bool),
+		d.Get(schemaPmHttpHeaders).(string),
+		d.Get(schemaPmTimeout).(int),
+		d.Get(schemaPmDebug).(bool),
+		d.Get(schemaPmProxyServer).(string),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	//permission check
 	minimumPermissions := []string{
 		"Datastore.AllocateSpace",
 		"Datastore.Audit",
 		"Pool.Allocate",
+		"Pool.Audit",
 		"Sys.Audit",
 		"Sys.Console",
 		"Sys.Modify",
@@ -212,62 +255,70 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 		"VM.Config.Network",
 		"VM.Config.Options",
 		"VM.Migrate",
-		"VM.Monitor",
 		"VM.PowerMgmt",
 	}
-	var id string
-	if result, getok := d.GetOk("pm_api_token_id"); getok {
-		id = result.(string)
-		id = strings.Split(id, "!")[0]
-	} else if result, getok := d.GetOk("pm_user"); getok {
-		id = result.(string)
-	}
-	userID, err := pxapi.NewUserID(id)
-	if err != nil {
-		return nil, err
-	}
-	permlist, err := client.GetUserPermissions(userID, "/")
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(permlist)
-	sort.Strings(minimumPermissions)
-	permDiff := permissions_check(permlist, minimumPermissions)
-	if len(permDiff) == 0 {
-		// look to see what logging we should be outputting according to the provider configuration
-		logLevels := make(map[string]string)
-		for logger, level := range d.Get("pm_log_levels").(map[string]interface{}) {
-			levelAsString, ok := level.(string)
-			if ok {
-				logLevels[logger] = levelAsString
-			} else {
-				return nil, fmt.Errorf("invalid logging level %v for %v. Be sure to use a string", level, logger)
-			}
+	if v, ok := d.GetOk(schemaMinimumPermissionList); ok {
+		rawArray := v.([]any)
+		minimumPermissions = make([]string, len(rawArray))
+		for i := range rawArray {
+			minimumPermissions[i] = rawArray[i].(string)
 		}
-
-		// actually configure logging
-		// note that if enable is false here, the configuration will squash all output
-		ConfigureLogger(
-			d.Get("pm_log_enable").(bool),
-			d.Get("pm_log_file").(string),
-			logLevels,
-		)
-
-		var mut sync.Mutex
-		return &providerConfiguration{
-			Client:                             client,
-			MaxParallel:                        d.Get("pm_parallel").(int),
-			CurrentParallel:                    0,
-			MaxVMID:                            -1,
-			Mutex:                              &mut,
-			Cond:                               sync.NewCond(&mut),
-			LogFile:                            d.Get("pm_log_file").(string),
-			LogLevels:                          logLevels,
-			DangerouslyIgnoreUnknownAttributes: d.Get("pm_dangerously_ignore_unknown_attributes").(bool),
-		}, nil
 	}
-	err = fmt.Errorf("permissions for user/token %s are not sufficient, please provide also the following permissions that are missing: %v", userID.ToString(), permDiff)
-	return nil, err
+
+	if d.Get(schemaMinimumPermissionCheck).(bool) { // permission check
+		var id string
+		if result, ok := d.GetOk(schemaPmApiTokenID); ok {
+			id = result.(string)
+			id = strings.Split(id, "!")[0]
+		} else if result, ok := d.GetOk(schemaPmUser); ok {
+			id = result.(string)
+		}
+		userID, err := pveSDK.NewUserID(id)
+		if err != nil {
+			return nil, err
+		}
+		permList, err := client.GetUserPermissions(context.Background(), userID, "/")
+		if err != nil {
+			return nil, err
+		}
+		sort.Strings(permList)
+		sort.Strings(minimumPermissions)
+		permDiff := permissions_check(permList, minimumPermissions)
+		if len(permDiff) != 0 {
+			return nil, fmt.Errorf("permissions for user/token "+userID.ToString()+" are not sufficient, please provide also the following permissions that are missing: %v", permDiff)
+		}
+	}
+
+	// look to see what logging we should be outputting according to the provider configuration
+	logLevels := make(map[string]string)
+	for logger, level := range d.Get(schemaPmLogLevels).(map[string]any) {
+		levelAsString, ok := level.(string)
+		if ok {
+			logLevels[logger] = levelAsString
+		} else {
+			return nil, fmt.Errorf("invalid logging level %v for %v. Be sure to use a string", level, logger)
+		}
+	}
+
+	// actually configure logging
+	// note that if enable is false here, the configuration will squash all output
+	ConfigureLogger(
+		d.Get(schemaPmLogEnable).(bool),
+		d.Get(schemaPmLogFile).(string),
+		logLevels)
+
+	var mut sync.Mutex
+	return &providerConfiguration{
+		Client:                             client,
+		MaxParallel:                        d.Get(schemaPmParallel).(int),
+		CurrentParallel:                    0,
+		MaxGuestID:                         0,
+		Mutex:                              &mut,
+		Cond:                               sync.NewCond(&mut),
+		LogFile:                            d.Get(schemaPmLogFile).(string),
+		LogLevels:                          logLevels,
+		DangerouslyIgnoreUnknownAttributes: d.Get(schemaPmDangerouslyIgnoreUnknownAttributes).(bool),
+	}, nil
 }
 
 func getClient(pm_api_url string,
@@ -280,7 +331,7 @@ func getClient(pm_api_url string,
 	pm_http_headers string,
 	pm_timeout int,
 	pm_debug bool,
-	pm_proxy_server string) (*pxapi.Client, error) {
+	pm_proxy_server string) (*pveSDK.Client, error) {
 
 	tlsconf := &tls.Config{InsecureSkipVerify: true}
 	if !pm_tls_insecure {
@@ -305,12 +356,12 @@ func getClient(pm_api_url string,
 		err = fmt.Errorf("your API TokenID username should contain a !, check your API credentials")
 	}
 
-	client, _ := pxapi.NewClient(pm_api_url, nil, pm_http_headers, tlsconf, pm_proxy_server, pm_timeout)
-	*pxapi.Debug = pm_debug
+	client, _ := pveSDK.NewClient(pm_api_url, nil, pm_http_headers, tlsconf, pm_proxy_server, pm_timeout)
+	*pveSDK.Debug = pm_debug
 
 	// User+Pass authentication
 	if pm_user != "" && pm_password != "" {
-		err = client.Login(pm_user, pm_password, pm_otp)
+		err = client.Login(context.Background(), pm_user, pm_password, pm_otp)
 	}
 
 	// API authentication
@@ -325,14 +376,15 @@ func getClient(pm_api_url string,
 	return client, nil
 }
 
-func nextVmId(pconf *providerConfiguration) (nextId int, err error) {
+func nextVmId(pconf *providerConfiguration) (nextId pveSDK.GuestID, err error) {
 	pconf.Mutex.Lock()
 	defer pconf.Mutex.Unlock()
-	pconf.MaxVMID, err = pconf.Client.GetNextID(pconf.MaxVMID + 1)
+	nextId, err = pconf.Client.GetNextID(context.Background(), nil)
 	if err != nil {
 		return 0, err
 	}
-	nextId = pconf.MaxVMID
+	pconf.MaxGuestID = nextId
+
 	return nextId, nil
 }
 
@@ -374,27 +426,6 @@ func pmParallelBegin(pconf *providerConfiguration) *pmApiLockHolder {
 	}
 	lock.lock()
 	return lock
-}
-
-func resourceId(targetNode string, resType string, vmId int) string {
-	return fmt.Sprintf("%s/%s/%d", targetNode, resType, vmId)
-}
-
-func parseResourceId(resId string) (targetNode string, resType string, vmId int, err error) {
-	// create a logger for this function
-	logger, _ := CreateSubLogger("parseResourceId")
-
-	if !rxRsId.MatchString(resId) {
-		return "", "", -1, fmt.Errorf("invalid resource format: %s. Must be <node>/<type>/<vmid>", resId)
-	}
-	idMatch := rxRsId.FindStringSubmatch(resId)
-	targetNode = idMatch[1]
-	resType = idMatch[2]
-	vmId, err = strconv.Atoi(idMatch[3])
-	if err != nil {
-		logger.Info().Str("error", err.Error()).Msgf("failed to get vmId")
-	}
-	return
 }
 
 func clusterResourceId(resType string, resId string) string {
